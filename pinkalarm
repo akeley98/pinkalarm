@@ -1,0 +1,478 @@
+#!/usr/bin/python2
+
+import sys, os
+from signal import SIGINT
+import time
+import pygame
+
+# Set working directory to the directory this script is in. Makes life easy.
+try:
+    os.chdir(os.path.split(__file__)[0])
+except OSError: pass
+
+pink_noise_filename = "./pink.wav"
+alarm_sound_filename = "./alarm.ogg"
+volume_adjust_step = 1/16.
+
+# Milliseconds taken to fade background noise before alarm sound.
+noise_alarm_fade_ms = 6000
+
+# Milliseconds taken to fade other noises before playing text-to-speech sounds.
+speak_fade_ms = 400
+
+pygame.init()
+pygame.mixer.init()
+
+
+def how_far_between(x, start, end):
+    """Computes how far `x` is between `start` and `end`. Clamped to
+between 0 and 1. Handles end < start correctly. Reverse engineer the
+function if you want a more mathematically-rigorous explanation.
+
+    """
+    return min(1, max(0, float(x - start) / (end - start)))
+
+class Alarmclock(object):
+    """Object responsible for keeping track of the alarm clock set time
+(if any), processing user input pertaining to setting the alarm clock
+(see input_digit and confirm_input), and checking if the alarm
+clock should ring.
+
+    """
+    __slots__ = [
+        # Time that the alarm clock should ring formatted as "hh:mm"
+        # string.  None if the alarm clock is not set. I store hh:mm
+        # time rather than epoch time and use string comparisons to
+        # see if the alarm should ring partially so that we "do the
+        # right thing" in tricky circumstances like timezone or
+        # daylight-saving time changes. :-/
+        "_alarm_hhmm_time",
+        
+        # Whether the hh:mm time string should be interpreted as local (True)
+        # or zulu time (False).
+        "_alarm_in_local_time",
+        
+        # The value that alarm_in_local_time shall take the next time
+        # that the alarm clock is set.
+        "_next_alarm_in_local_time",
+        
+        # Last four digits input on keyboard (through input_digit method).
+        # Used to set the alarm clock time.
+        "_last_four_digits",
+    ]
+    
+    def __init__(self):
+        self._alarm_hhmm_time = None
+        self._alarm_in_local_time = True
+        self._next_alarm_in_local_time = True
+        self._last_four_digits = "0000"
+    
+    def input_digit(self, digit):
+        """Process one digit of user input, passed as a single character '0'
+through '9'."""
+        if digit not in "0123456789":
+            raise ValueError("%r is not a digit character 0-9" % digit)
+        self._last_four_digits = self._last_four_digits[-3:] + digit
+    
+    def confirm_input(self, sound_channel):
+        """Set the alarm clock time using the last four digits input, in hh:mm
+order. Announce this on the sound_channel."""
+        assert len(self._last_four_digits) == 4
+        assert type(self._last_four_digits) is str
+        # It's internal data; don't care about subclassing/unicode/isinstance.
+        
+        # Remember the time the alarm clock should go off at.
+        self._alarm_hhmm_time = "%s%s:%s%s" % tuple(self._last_four_digits)
+        self._alarm_in_local_time = self._next_alarm_in_local_time
+
+        sound_channel.speak(self.get_alarm_time_text())
+    
+    def cancel(self, sound_channel):
+        """Cancel the alarm set, announcing this on the sound_channel."""
+        self._alarm_hhmm_time = None
+        sound_channel.speak("Alarm cancelled.")
+    
+    def get_alarm_time_text(self):
+        """Get the string that announces the time that the alarm clock is
+set."""
+        if not self._alarm_hhmm_time:
+            return "Alarm not set."
+        
+        if self._alarm_in_local_time:
+            local_or_zulu = "local time"
+        else:
+            local_or_zulu = "zulu"
+        
+        numbers = text_from_hhmm_string(self._alarm_hhmm_time)
+        
+        maybe_warn = ""
+        if not self._hhmm_string_appears_valid():
+            maybe_warn = "Alarm time appears invalid. "
+        
+        return "%sAlarm set for %s%s." % (maybe_warn, numbers, local_or_zulu)
+    
+    def _hhmm_string_appears_valid(self):
+        if len(self._alarm_hhmm_time) != 5: return False
+        
+        for i, char in enumerate(self._alarm_hhmm_time):
+            if i == 2 and char != ':': return False
+            if i != 2 and not char.isdigit(): return False
+        
+        return True
+    
+    def toggle_next_alarm_in_local_time(self, sound_channel, set_value=None):
+        """Control whether the next alarm set (using confirm_alarm_time) is in
+zulu or local time, based on the truthiness of set_value. If set_value
+is None, toggles _next_alarm_in_local_time from True to False or False
+to True. Announce this on the sound_channel."""
+        if set_value:
+            self._next_alarm_in_local_time = True
+        elif set_value is not None:
+            self._next_alarm_in_local_time = False
+        else:
+            self._next_alarm_in_local_time = not self._next_alarm_in_local_time
+        
+        if self._next_alarm_in_local_time:
+            sound_channel.speak("Zulu time (UTC) used to set next alarm.")
+        else:
+            sound_channel.speak("Local time used to set next alarm.")
+
+    def should_ring(self):
+        """Returns truthy iff the alarm should start ringing right now. Should
+be checked at least once per minute."""
+        if not self._alarm_hhmm_time:
+            return False
+        
+        current_epoch_time = time.time()
+        struct_time = time.localtime(current_epoch_time) \
+                      if self._alarm_in_local_time \
+                      else time.gmtime(current_epoch_time)
+
+        hhmm_string_now = time.strftime("%H:%M", struct_time)
+        
+        # In a sane world, we could check whether the alarm should ring just
+        # by comparing the wall clock's hh:mm readout with the hh:mm string
+        # representing the alarm clock ringing time.
+        if hhmm_string_now == self._alarm_hhmm_time:
+            return True
+        
+        # ...however, need to do a quick daylight saving check, in case the
+        # user requested a time that doesn't exist due to that hour being
+        # skipped by DST. This check relies on a bunch of American DST
+        # assumptions, so I hope to God no region on Earth uses even dumber
+        # DST schemes that I didn't anticipate...
+        
+        # Skip check if the alarm's in zulu time; no DST there.
+        if not self._alarm_in_local_time:
+            return False
+        
+        # Check if DST started by seeing if it's dst now and wasn't
+        # dst an hour ago.
+        dst_just_started = (struct_time.tm_isdst and
+            not time.localtime(current_epoch_time - 3600).tm_isdst)
+        
+        # If DST just started and the current hh:mm time is after
+        # (numerically higher) than the alarm trigger hh:mm, we may
+        # have skipped the time the user meant to trigger the alarm
+        # clock and we should ring the alarm.
+        return dst_just_started and hhmm_string_now <= self._alarm_hhmm_time
+
+
+class SoundThingie(object):
+    """Class responsible for playing only one sound at a time. Typically,
+if another sound is played before one is finished, the earlier sound
+is cancelled. The update() method must be called periodically for this
+object to function. Sounds are played in the priority order:
+
+1. Synthesized text-to-speech (generated and played by text-to-speech subprocess)
+2. Alarm clock sound
+3. Background pink noise (plays only when no other sounds are playing)
+    """
+    __slots__ = [
+        # Volume 0.0 to 1.0 of background pink noise.
+        "_noise_volume_scale",
+        
+        # Volume 0.0 to 1.0 of alarm clock sound.
+        "_alarm_volume_scale",
+        
+        # PID of text-to-speech process. None when not running.
+        "_child_pid",
+        
+        # String of text to speak. None when there is no text
+        # scheduled to speak, or child text-to-speech process already
+        # spawned.
+        "_text_to_speak",
+        
+        # Tick (milliseconds) that the text-to-speech is scheduled to start
+        # on. Used to fade out other sounds in preparation for text-to-speech.
+        # Set to None only when there's no text-to-speech scheduled AND current
+        # text-to-speech process has finished.
+        "_speak_start_ticks",
+        
+        # Once the speaking child process ends, set to the tick that
+        # the process ended on, to facilitate fading in volume.
+        "_speak_end_ticks",
+        
+        # Analagous fields for the alarm sound.
+        "_alarm_start_ticks",
+        "_alarm_end_ticks",
+        
+        # Pygame sound objects.
+        "_alarm_pygame_sound",
+        "_noise_pygame_sound",
+        
+        # Pygame channels used to play alarmclock and pink noise sounds.
+        # May be set to None when not applicable.
+        "_alarm_pygame_channel",
+        "_noise_pygame_channel",
+    ]
+    
+    def __init__(self):
+        self._noise_volume_scale = 0.0
+        self._alarm_volume_scale = 1.0
+        
+        self._child_pid = None
+        
+        self._text_to_speak = None
+        self._speak_start_ticks = None
+        self._speak_end_ticks = - speak_fade_ms # Hack
+        
+        self._alarm_start_ticks = None
+        self._alarm_end_ticks = - noise_alarm_fade_ms # Hack
+        
+        # Check that the required sound files exist with at least read
+        # permission (pygame silently fails if they don't...)
+        try:
+            os.close(os.open(alarm_sound_filename, os.O_RDONLY))
+            os.close(os.open(pink_noise_filename, os.O_RDONLY))
+        except OSError as e:
+            raise Exception("Could not load needed sound file: %r" % e)
+        
+        self._alarm_pygame_sound = pygame.mixer.Sound(alarm_sound_filename)
+        self._noise_pygame_sound = pygame.mixer.Sound(pink_noise_filename)
+        self._alarm_pygame_sound.set_volume(self._alarm_volume_scale)
+        self._noise_pygame_sound.set_volume(self._noise_volume_scale)
+        
+        self._alarm_pygame_channel = None
+        
+        # Noise should be playing in background always.
+        self._noise_pygame_channel = self._noise_pygame_sound.play(-1)
+    
+    def update(self):
+        """Call periodically to make this object function correctly."""
+        
+        # Go through and roughly update each member variable
+        # (described in __slots__) in order.
+        
+        t = pygame.time.get_ticks()
+        
+        # Check that child text-to-speech process, if any, is done.
+        if self._child_pid is not None:
+            pid, status = os.waitpid(self._child_pid, os.WNOHANG)
+            # Should I check for failure? Hope text-to-speech has
+            # no critical information.
+            if pid != 0:
+                assert pid == self._child_pid
+                self._child_pid = None
+                self._speak_start_ticks = None
+                self._speak_end_ticks = t
+        
+        # If there is text to speak and it's scheduled to start now,
+        # start text-to-speech process.
+        if self._text_to_speak and self._speak_start_ticks >= t:
+            self._start_text_to_speech_process()
+            self._text_to_speak = None
+        
+        # Check if the alarm noise just ended; if so set
+        # _alarm_start_ticks, _alarm_end_ticks, and clear the alarm
+        # channel to None.
+        if self._alarm_pygame_channel is not None:
+            if not self._alarm_pygame_channel.get_busy():
+                self._alarm_start_ticks = None
+                self._alarm_end_ticks = t
+                self._alarm_pygame_channel = None
+        
+        # If the alarm is scheduled to ring and is not already
+        # ringing, start the alarm sound.
+        alarm_scheduled_now = (
+            self._alarm_start_ticks and
+            self._alarm_start_ticks >= t
+        )
+        alarm_ringing = (self._alarm_pygame_channel is not None and
+             self._alarm_pygame_channel.get_busy()
+        )
+        if alarm_scheduled_now and not alarm_ringing:
+            self._alarm_pygame_channel = self._alarm_pygame_sound.play(1)
+
+        # Finally, we need to set the actual volumes for the noise and
+        # alarm channels, taking into account any fade-in/fade-out effects.
+        # Maybe this should have been placed in its own function.
+        actual_noise_volume = self.noise_volume()
+        actual_alarm_volume = self.alarm_volume()
+        
+        speak_start = self._speak_start_ticks
+        speak_end = self._speak_end_ticks
+        alarm_start = self._alarm_start_ticks
+        alarm_end = self._alarm_end_ticks
+        
+        # Check for fade out effects due to imminent start of text-to-speech
+        if speak_start is not None:
+            s = how_far_between(t, speak_start, speak_start - speak_fade_ms)
+            actual_noise_volume *= s
+            actual_alarm_volume *= s
+        
+        # Same, for fade in after end of text-to-speech
+        s = how_far_between(t, speak_end, speak_end + speak_fade_ms)
+        actual_noise_volume *= s
+        actual_alarm_volume *= s
+        
+        # Now do the same check for the alarm causing the background
+        # noise to fade.
+        if alarm_start is not None:
+            actual_noise_volume *= how_far_between(
+                t, alarm_start, alarm_start - noise_alarm_fade_ms)
+        
+        actual_noise_volume *= how_far_between(
+            t, alarm_end, alarm_end + noise_alarm_fade_ms)
+        
+        # Finally, update the sound volumes for the pygame Sound objects.
+        self._alarm_pygame_sound.set_volume(actual_alarm_volume)
+        self._noise_pygame_sound.set_volume(actual_noise_volume)
+    
+    def _start_text_to_speech_process(self):
+        """Start a text-to-speech process, possibly killing and replacing the
+one currently running. Has no effects on this object's member
+variables other than _child_pid -- see main update() function for
+other necessary state changes.
+
+        """
+        
+        assert self._text_to_speak is not None
+        
+        if self._child_pid is not None:
+            os.kill(self._child_pid, SIGINT)
+            os.waitpid(self._child_pid, 0)
+
+        read_fd, write_fd = os.pipe()
+        pid = os.fork()
+        self._child_pid = pid
+        
+        # Child process, run text-to-speech script
+        if pid == 0:
+            os.close(write_fd)
+            os.dup2(read_fd, 0)
+            os.close(read_fd)
+            os.execvp("./text-to-speech", ["./text-to-speech"])
+        # Parent process: pipe text to child's stdin.
+        else:
+            print(text)
+            os.write(write_fd, self._text_to_speak)
+            os.close(read_fd)
+            os.close(write_fd)
+    
+    def noise_volume(self, volume=None):
+        """Get the noise volume. If an argument is passed, set the noise
+volume.
+
+        """
+        if volume is not None:
+            v = min(1, max(0, volume))
+            self._noise_volume_scale = v
+            self._noise_pygame_sound.set_volume(v)
+        return self._noise_volume_scale
+    
+    def alarm_volume(self, volume=None):
+        """Get the volume used to ring the alarm. If an argument is passed,
+set the alarm clock ring volume.
+
+        """
+        if volume is not None:
+            v = min(1, max(0, volume))
+            self._alarm_volume_scale = v
+            self._alarm_pygame_sound.set_volume(v)
+        return self._alarm_volume_scale
+    
+    def start_alarm_ring(self):
+        """Start ringing the alarm clock."""
+        # Do this by scheduling the alarm to ring later.
+        t = pygame.time.get_ticks()
+        self._alarm_start_ticks = t + noise_alarm_fade_ms
+    
+
+def text_from_hhmm_string(string):
+    """Convert an "hh:mm" string to a (spoken) text representation."""
+    result = ""
+    
+    for i,s in enumerate(string.split(':')):
+        digit_table = {
+            "0":"zero ", "1":"one ", "2":"two ", "3":"three ", "4":"four ",
+            "5":"five ", "6":"six ", "7":"seven ", "8":"eight ", "9":"nine ",
+        }
+        
+        special_case_table = {
+            "10":"ten ",
+            "11":"eleven ",
+            "12":"twelve ",
+        }
+        
+        txt = special_case_table.get(s)
+        
+        if i == 1 and s == "00":
+            txt = "hundred hours "
+        
+        if txt:
+            result += txt
+        else:
+            result += ''.join(map(digit_table.get, s))
+    
+    return result
+
+
+def say_text(text):
+    """Use text-to-speech script to speak the string passed in argument
+`text` on speakers. Return only after this is done.
+
+    """
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+    
+    # Child process, run text-to-speech script
+    if pid == 0:
+        os.close(write_fd)
+        os.dup2(read_fd, 0)
+        os.close(read_fd)
+        os.execvp("./text-to-speech", ["./text-to-speech"])
+    # Parent process: pipe text to child's stdin and wait.
+    else:
+        print(text)
+        os.write(write_fd, text)
+        os.close(read_fd)
+        os.close(write_fd)
+        pid, status = os.waitpid(pid, 0)
+        if status != 0:
+            raise OSError("text-to-speech had nonzero exit status %d" % status)
+
+
+def toggle_next_alarm_in_local_time():
+    global next_alarm_in_local_time
+    if next_alarm_in_local_time:
+        next_alarm_in_local_time = False
+        say_text("Alarm clock time will be set using zulu time (UTC).")
+    else:
+        next_alarm_in_local_time = True
+        say_text("Alarm clock time will be set using local time.")
+
+
+def set_alarm_clock_using_last_four_digits():
+    """Activate the alarm clock and set it to go off at the time named by
+the last four digits input by the user (last_four_digits
+variable). Make sure to check whether the user wants local or zulu
+time."""
+    global alarm_in_local_time
+    alarm_in_local_time = next_alarm_in_local_time
+    
+    global alarm_hhmm_time
+    alarm_hhmm_time = "%s:%s" % (last_four_digits[0:2], last_four_digits[2:4])
+
+
+s = SoundThingie()
