@@ -12,7 +12,7 @@ except OSError: pass
 
 pink_noise_filename = "./pink.wav"
 alarm_sound_filename = "./alarm.ogg"
-volume_adjust_step = 1/32.
+volume_adjust_step = 1/16.
 
 # Milliseconds taken to fade background noise before alarm sound.
 noise_alarm_fade_ms = 6000
@@ -156,9 +156,9 @@ to True. Announce this on the sound_thing."""
             self._next_alarm_in_local_time = not self._next_alarm_in_local_time
         
         if self._next_alarm_in_local_time:
-            sound_thing.speak("Zulu time (UTC) used to set next alarm.")
-        else:
             sound_thing.speak("Local time used to set next alarm.")
+        else:
+            sound_thing.speak("Zulu time (UTC) used to set next alarm.")
 
     def should_ring(self):
         """Returns truthy iff the alarm should start ringing right now. Should
@@ -419,6 +419,11 @@ set the alarm clock ring volume.
             t = pygame.time.get_ticks()
             self._alarm_start_ticks = t + noise_alarm_fade_ms
     
+    def start_alarm_test(self):
+        """Start the alarm clock test (ring alarm immediately)."""
+        t = pygame.time.get_ticks()
+        self._alarm_start_ticks = t + 1
+    
     def stop_alarm(self):
         """Stop the alarm sound."""
         if self._alarm_pygame_channel is not None:
@@ -469,7 +474,12 @@ def text_from_hhmm_string(string):
     return result
 
 class PublicFunctions(object):
+    def alarm_test_mode(pf):
+        pf.in_alarm_test_mode = not pf.in_alarm_test_mode
+    
     def __init__(pf, sound, alarm):
+        pf.in_alarm_test_mode = False
+    
         pf.input0 = lambda: (alarm.input_digit('0'), sound.speak('0'))
         pf.input1 = lambda: (alarm.input_digit('1'), sound.speak('1'))
         pf.input2 = lambda: (alarm.input_digit('2'), sound.speak('2'))
@@ -494,8 +504,13 @@ class PublicFunctions(object):
         
         pf.time = lambda: alarm.speak_times(sound)
         
+        pf.toggle_next_alarm_in_local_time = \
+            lambda: alarm.toggle_next_alarm_in_local_time(sound)
+        
+        pf.toggle_local_time = pf.toggle_next_alarm_in_local_time
+        
 def make_key_char_to_function_dict(pf):
-    return {
+    base_dict = {
         '0':pf.input0,
         '1':pf.input1,
         '2':pf.input2,
@@ -508,6 +523,7 @@ def make_key_char_to_function_dict(pf):
         '9':pf.input9,
         '\r':pf.confirm_alarm,
         '\n':pf.confirm_alarm,
+        '\x1b':pf.cancel_alarm,
         '\x7f':pf.cancel_alarm,
         '\x08':pf.cancel_alarm,
         
@@ -517,13 +533,32 @@ def make_key_char_to_function_dict(pf):
         
         '/':pf.time,
         '?':pf.time,
+        
+        '*':pf.toggle_local_time,
+        
+        '.':pf.alarm_test_mode,
     }
+    
+    return base_dict
+
+def make_alarm_test_function_dict(pf):
+    base_dict = {
+        '+':pf.alarm_volume_up,
+        '=':pf.alarm_volume_up,
+        '-':pf.alarm_volume_down,
+    }
+    
+    return base_dict
 
 def main():
     sound = SoundThingie()
     alarm = Alarm()
+    
     pf = PublicFunctions(sound, alarm)
     key_char_to_function_dict = make_key_char_to_function_dict(pf)
+    alarm_test_function_dict = make_alarm_test_function_dict(pf)
+    
+    alarm_test_mode = False
     
     disp = pygame.display.set_mode((200,200))
     
@@ -538,18 +573,27 @@ def main():
             if e.type == pygame.QUIT:
                 return
             if e.type == pygame.KEYDOWN and e.unicode:
-                callback = key_char_to_function_dict.get(e.unicode)
-                if callback: callback()
-
-
-
-        
-def test():
-    s = SoundThingie()
-    s.noise_volume(.3)
-    time.sleep(.3)
-    s.speak('1 2 3 4')
-    while 1: s.update()
+                if pf.in_alarm_test_mode:
+                    function_dict = alarm_test_function_dict
+                else:
+                    function_dict = key_char_to_function_dict
+                
+                was_in_alarm_test_mode = pf.in_alarm_test_mode
+                
+                callback = function_dict.get(e.unicode)
+                if callback is not None:
+                    callback()
+                if callback is None and pf.in_alarm_test_mode:
+                    pf.in_alarm_test_mode = False
+                
+                if pf.in_alarm_test_mode and not was_in_alarm_test_mode:
+                    sound.stop_alarm()
+                    sound.start_alarm_test()
+                    sound.speak("alarm test mode")
+                
+                if not pf.in_alarm_test_mode and was_in_alarm_test_mode:
+                    sound.stop_alarm()
+                    sound.speak("exit alarm test")
 
 if __name__ == "__main__":
     main()
