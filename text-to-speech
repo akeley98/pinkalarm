@@ -1,3 +1,0 @@
-#!/bin/sh
-# Take text on stdin and turn into speech on speakers.
-flite/bin/flite -voice awb /dev/stdin play
