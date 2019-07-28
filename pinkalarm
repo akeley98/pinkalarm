@@ -88,6 +88,10 @@ order. Announce this on the sound_thing."""
         # Remember the time the alarm clock should go off at.
         self._alarm_hhmm_time = "%s%s:%s%s" % tuple(self._last_four_digits)
         self._alarm_in_local_time = self._next_alarm_in_local_time
+        
+        # Implicitly replace 24th hour with 0th hour.
+        if self._alarm_hhmm_time.startswith('24'):
+            self._alarm_hhmm_time = '00' + self._alarm_hhmm_time[2:]
 
         sound_thing.speak(self.get_alarm_time_text())
     
@@ -122,11 +126,12 @@ time."""
         zulu = time.gmtime()
         
         strings = [
-            text_from_hhmm_string(time.strftime("%H:%M", local)),
-            " local time ",
-            text_from_hhmm_string(time.strftime("%H:%M", zulu)),
-            " zulu ",
             self.get_alarm_time_text(),
+            "Currently",
+            text_from_hhmm_string(time.strftime("%H:%M", local)),
+            "local time",
+            text_from_hhmm_string(time.strftime("%H:%M", zulu)),
+            "zulu",
         ]
         
         sound_thing.speak(' '.join(strings))
@@ -475,7 +480,7 @@ def text_from_hhmm_string(string):
 
 class PublicFunctions(object):
     def alarm_test_mode(pf):
-        pf.in_alarm_test_mode = not pf.in_alarm_test_mode
+        pf.in_alarm_test_mode = True
     
     def __init__(pf, sound, alarm):
         pf.in_alarm_test_mode = False
@@ -509,6 +514,13 @@ class PublicFunctions(object):
         
         pf.toggle_local_time = pf.toggle_next_alarm_in_local_time
         
+        pf.use_local_time = \
+            lambda: alarm.toggle_next_alarm_in_local_time(sound, True)
+        pf.use_zulu_time = \
+            lambda: alarm.toggle_next_alarm_in_local_time(sound, False)
+        
+        pf.quit = sys.exit
+        
 def make_key_char_to_function_dict(pf):
     base_dict = {
         '0':pf.input0,
@@ -523,20 +535,31 @@ def make_key_char_to_function_dict(pf):
         '9':pf.input9,
         '\r':pf.confirm_alarm,
         '\n':pf.confirm_alarm,
+        'c':pf.confirm_alarm,
         '\x1b':pf.cancel_alarm,
         '\x7f':pf.cancel_alarm,
         '\x08':pf.cancel_alarm,
+        'x':pf.cancel_alarm,
         
         '+':pf.noise_volume_up,
         '=':pf.noise_volume_up,
+        'u':pf.noise_volume_up,
         '-':pf.noise_volume_down,
+        'd':pf.noise_volume_down,
         
+        't':pf.time,
         '/':pf.time,
         '?':pf.time,
         
+        'z':pf.use_zulu_time,
+        'l':pf.use_local_time,
         '*':pf.toggle_local_time,
         
         '.':pf.alarm_test_mode,
+        
+        'Q':pf.quit,
+        '\x11':pf.quit,
+        '\x17':pf.quit,
     }
     
     return base_dict
@@ -545,7 +568,9 @@ def make_alarm_test_function_dict(pf):
     base_dict = {
         '+':pf.alarm_volume_up,
         '=':pf.alarm_volume_up,
+        'u':pf.alarm_volume_up,
         '-':pf.alarm_volume_down,
+        'd':pf.alarm_volume_down,
     }
     
     return base_dict
