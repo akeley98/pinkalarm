@@ -3,7 +3,7 @@
 import sys, os
 from signal import SIGINT
 import time
-import pygame
+# import pygame in main function.
 
 # Set working directory to the directory this script is in. Makes life easy.
 try:
@@ -26,10 +26,6 @@ text_to_speech_args = ("espeak",)
 # text_to_speech_args = ('spd-say', '-e')
 # text_to_speech_args = \
 #     ("./flite/bin/flite", "-voice", "awb", "/dev/stdin", "play")
-
-pygame.init()
-pygame.mixer.init()
-
 
 def how_far_between(x, start, end):
     """Computes how far `x` is between `start` and `end`. Clamped to
@@ -407,21 +403,7 @@ other necessary state changes.
             os.kill(self._child_pid, SIGINT)
             os.waitpid(self._child_pid, 0)
 
-        read_fd, write_fd = os.pipe()
-        pid = os.fork()
-        self._child_pid = pid
-        
-        # Child process, run text-to-speech script
-        if pid == 0:
-            os.close(write_fd)
-            os.dup2(read_fd, 0)
-            os.close(read_fd)
-            os.execvp(text_to_speech_args[0], text_to_speech_args)
-        # Parent process: pipe text to child's stdin.
-        else:
-            os.write(write_fd, self._text_to_speak)
-            os.close(read_fd)
-            os.close(write_fd)
+        self._child_pid = start_text_to_speech_process(self._text_to_speak)
     
     def alarm_busy(self):
         alarm_scheduled_now = self._alarm_start_ticks is not None
@@ -517,11 +499,34 @@ def text_from_hhmm_string(string):
     return ' '.join(words)
 
 
+def start_text_to_speech_process(text):
+    """Start a text-to-speech process speaking the string passed in the
+`text` parameter. Return the process's PID.
+
+    """
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+    
+    # Child process, run text-to-speech script
+    if pid == 0:
+        os.close(write_fd)
+        os.dup2(read_fd, 0)
+        os.close(read_fd)
+        os.execvp(text_to_speech_args[0], text_to_speech_args)
+    # Parent process: pipe text to child's stdin.
+    else:
+        os.write(write_fd, text)
+        os.close(read_fd)
+        os.close(write_fd)
+    
+    return pid
+
+
 class PublicFunctions(object):
     """Collection of functions that the user can bind to keyboard actions."""
     
     def __init__(pf, sound, alarm):
-        """Pass in the SoundThingie and the AlarmClock objects."""
+        """Pass in the SoundThingie and the Alarm objects."""
         pf.say_hello_world = lambda: sound.speak("Hello, world!")
     
         pf.input0 = lambda: (alarm.input_digit('0'), sound.speak('0'))
@@ -580,12 +585,15 @@ class PublicFunctions(object):
         
         pf.debug_alarm_should_ring = lambda: sys.stdout.write(
             "Alarm should ring.\n" if alarm.should_ring() else "no.\n")
+        
+        pf.debug_crash = lambda: \
+            (sys.stderr.write("debug_crash\n"), os.abort())
 
 
 def make_key_char_to_function_dict(pf):
     """Given the PublicFunctions collection of user-facing functions,
-return a dict that maps keyboard characters to callable
-functions. Provide the default such dict first, then modify it by
+return a dict that maps keyboard characters to PublicFunctions'
+callables. Provide the default such dict first, then modify it by
 parsing the keybind file.
 
 keybind syntax:
@@ -596,9 +604,9 @@ Other lines should be a string of whitespace separated tokens.
 
 First token on line should name a callable in pf (PublicFunctions).
 
-Subsequent tokens should either be single characters (maps keystroke
-to the callable named at the start of the line), or a 2 digit hex
-number.
+Each subsequent token should either be a single character (named
+characters are mapped to the callable named at the start of the line),
+or a 2+ digit hex number.
 
     """
     the_dict = {
@@ -663,6 +671,7 @@ number.
         '\x17':pf.quit,
         
         '\x01':pf.debug_alarm_should_ring,
+        '\x1c':pf.debug_crash,
     }
     
     try:
@@ -693,9 +702,6 @@ number.
                 the_dict[token] = callback
             else:
                 try:
-                    if len(token) != 2:
-                        raise ValueError("Expected single character "
-                            "or 2 digit hex number.")
                     the_dict[chr(int(token, 16))] = callback
                 except Exception as e:
                     sys.stderr.write("Line %d: Invalid token `%s`: %r.\n" %
@@ -703,10 +709,83 @@ number.
                     
     return the_dict
 
+
+def start_supervisor_process():
+    """Spawns a supervisor process that watches this process and tries to
+raise an audible alarm in case the main process crashes. Implement
+this using fork, with the parent being the supervisor and the child
+the main process. This means that the PID of the process will appear
+to change after this function returns.
+
+Catch BaseException everywhere because I want the function to try to
+work no matter what, even if things aren't functioning correctly.
+
+    """
+    try:
+        pid = os.fork()
+        if pid == 0:
+            return # Child process
+    except BaseException as e:
+        supervisor_alarm()
+        os._exit(1)
+    
+    pid_result, status = os.waitpid(pid, 0)
+    
+    if status == 0:
+        os._exit(0)
+    
+    try:
+        sys.stderr.write("Exit status %d.\n" % status)
+    except BaseException as e:
+        pass
+
+    supervisor_alarm()
+    os._exit(1)
+
+
+def supervisor_alarm():
+    """Function used by the supervisor process to try to make an audible
+alarm in case the main process crashes.
+
+    """
+    try:
+        # First, try to raise the alarm without using too much
+        # potentially broken stuff.  240 Hz seems audible without
+        # being too alarming of a sound.
+        os.system("sleep 3 && speaker-test -t sine -f 240 -l 1 &")
+    except BaseException as e:
+        pass
+    
+    # Now use text-to-speech to explain that we messed up.
+    try:
+        start_text_to_speech_process("Alarm clock process crashed.")
+    except BaseException as e:
+        pass
+    
+    # Play the alarm clock sound.
+    time.sleep(10)
+    import pygame
+    pygame.mixer.init()
+    channel = pygame.mixer.Sound(alarm_sound_filename).play()
+    
+    while channel.get_busy(): time.sleep(1)
+    
+
 def main():
-    """Instantiate the singleton objects for managing playing sounds,
-tracking the alarm clock trigger time, and mapping user input to
-actions. Then run the main loop."""
+    """Initialize Pygame. Instantiate the singleton objects for managing
+playing sounds, tracking the alarm clock trigger time, and mapping
+user input to actions. Then run the main loop.
+
+    """
+    start_supervisor_process()
+    
+    import pygame as pygame_
+    global pygame
+    pygame = pygame_
+    
+    pygame.init()
+    pygame.mixer.init()
+    
     sound = SoundThingie()
     alarm = Alarm()
     
