@@ -757,18 +757,19 @@ alarm in case the main process crashes.
         # First, try to raise the alarm without using too much
         # potentially broken stuff.  260 Hz seems audible without
         # being too alarming of a sound.
-        os.system("sleep 3 && speaker-test -t sine -f 260 -l 1 &")
+        os.system("sleep 7 && speaker-test -t sine -f 260 -l 1 &")
     except BaseException as e:
         pass
     
     # Now use text-to-speech to explain that we messed up.
     try:
-        start_text_to_speech_process("Alarm clock process crashed.")
+        start_text_to_speech_process("Alarm clock process crashed. "
+        "Alarm sound will be played at max volume.")
     except BaseException as e:
         pass
     
     # Play the alarm clock sound.
-    time.sleep(10)
+    time.sleep(20)
     import pygame
     pygame.mixer.init()
     channel = pygame.mixer.Sound(alarm_sound_filename).play()
