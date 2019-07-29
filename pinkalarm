@@ -3,20 +3,21 @@
 import sys, os
 from signal import SIGINT
 import time
-# import pygame in main function.
+# import pygame in main function. This is to keep the pygame instances between
+# the two child processes independent (see start_supervisor_process).
 
 # Set working directory to the directory this script is in. Makes life easy.
 try:
     os.chdir(os.path.split(__file__)[0])
 except OSError: pass
 
-pink_noise_filename = "./pink.wav"
-alarm_sound_filename = "./alarm.ogg" # Kevin Macleod - Living Voyage
-keybind_filename = "./keybinds.txt"
+pink_noise_filename = "./pinkalarm-data/pink.wav"
+alarm_sound_filename = "./pinkalarm-data/alarm.ogg" # Kevin Macleod - Living Voyage
+keybind_filename = "./pinkalarm-data/keybinds.txt"
 volume_adjust_step = 1/16.
 
 # Exit code to use when terminating normally, just so that we can
-# distinguish the cas where a some library crashes but the eejit
+# distinguish the case where a some library crashes but the eejit
 # programmer exits with code 0.
 PINKALARM_EXIT_OK = 42
 
