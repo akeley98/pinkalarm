@@ -15,6 +15,11 @@ alarm_sound_filename = "./alarm.ogg" # Kevin Macleod - Living Voyage
 keybind_filename = "./keybinds.txt"
 volume_adjust_step = 1/16.
 
+# Exit code to use when terminating normally, just so that we can
+# distinguish the cas where a some library crashes but the eejit
+# programmer exits with code 0.
+PINKALARM_EXIT_OK = 42
+
 # Milliseconds taken to fade background noise before alarm sound.
 noise_alarm_fade_ms = 6000
 
@@ -581,7 +586,7 @@ class PublicFunctions(object):
         pf.use_zulu_time = \
             lambda: alarm.toggle_next_alarm_in_local_time(sound, False)
         
-        pf.quit = lambda: sys.exit(0)
+        pf.quit = lambda: sys.exit(PINKALARM_EXIT_OK)
         
         pf.debug_alarm_should_ring = lambda: sys.stdout.write(
             "Alarm should ring.\n" if alarm.should_ring() else "no.\n")
@@ -731,7 +736,7 @@ work no matter what, even if things aren't functioning correctly.
     
     pid_result, status = os.waitpid(pid, 0)
     
-    if status == 0:
+    if status == PINKALARM_EXIT_OK * 256:
         os._exit(0)
     
     try:
@@ -750,9 +755,9 @@ alarm in case the main process crashes.
     """
     try:
         # First, try to raise the alarm without using too much
-        # potentially broken stuff.  240 Hz seems audible without
+        # potentially broken stuff.  260 Hz seems audible without
         # being too alarming of a sound.
-        os.system("sleep 3 && speaker-test -t sine -f 240 -l 1 &")
+        os.system("sleep 3 && speaker-test -t sine -f 260 -l 1 &")
     except BaseException as e:
         pass
     
@@ -807,7 +812,7 @@ user input to actions. Then run the main loop.
         
         for e in pygame.event.get():
             if e.type == pygame.QUIT:
-                return
+                sys.exit(PINKALARM_EXIT_OK)
             if e.type == pygame.KEYDOWN and e.unicode:
                 callback = key_char_to_function_dict.get(e.unicode)
                 if callback is not None:
