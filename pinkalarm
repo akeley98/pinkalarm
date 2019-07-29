@@ -11,7 +11,8 @@ try:
 except OSError: pass
 
 pink_noise_filename = "./pink.wav"
-alarm_sound_filename = "./alarm.ogg"
+alarm_sound_filename = "./alarm.ogg" # Kevin Macleod - Living Voyage
+keybind_filename = "./keybinds.txt"
 volume_adjust_step = 1/16.
 
 # Milliseconds taken to fade background noise before alarm sound.
@@ -21,8 +22,10 @@ noise_alarm_fade_ms = 6000
 speak_fade_ms = 250
 
 # Command line arguments for text to speech
-text_to_speech_args = \
-    ("./flite/bin/flite", "-voice", "awb", "/dev/stdin", "play")
+text_to_speech_args = ("espeak",)
+# text_to_speech_args = ('spd-say', '-e')
+# text_to_speech_args = \
+#     ("./flite/bin/flite", "-voice", "awb", "/dev/stdin", "play")
 
 pygame.init()
 pygame.mixer.init()
@@ -95,6 +98,23 @@ order. Announce this on the sound_thing."""
 
         sound_thing.speak(self.get_alarm_time_text())
     
+    def confirm_input_hour(self, sound_thing):
+        """Set the alarm clock time using the last two digits input, in hh:00
+format. Announce this on the sound_thing."""
+        assert len(self._last_four_digits) == 4
+        assert type(self._last_four_digits) is str
+        # It's internal data; don't care about subclassing/unicode/isinstance.
+        
+        # Remember the time the alarm clock should go off at.
+        self._alarm_hhmm_time = "%s%s:00" % tuple(self._last_four_digits[2:])
+        self._alarm_in_local_time = self._next_alarm_in_local_time
+        
+        # Implicitly replace 24th hour with 0th hour.
+        if self._alarm_hhmm_time.startswith('24'):
+            self._alarm_hhmm_time = '00' + self._alarm_hhmm_time[2:]
+
+        sound_thing.speak(self.get_alarm_time_text())
+    
     def cancel(self, sound_thing):
         """Cancel the alarm set, announcing this on the sound_thing."""
         self._alarm_hhmm_time = None
@@ -104,7 +124,7 @@ order. Announce this on the sound_thing."""
         """Get the string that announces the time that the alarm clock is
 set."""
         if not self._alarm_hhmm_time:
-            return "Alarm not set."
+            return "No alarm."
         
         if self._alarm_in_local_time:
             local_or_zulu = "local time"
@@ -117,8 +137,8 @@ set."""
         if not self._hhmm_string_appears_valid():
             maybe_warn = "Alarm time appears invalid. "
         
-        return "%sAlarm set for %s%s." % (maybe_warn, numbers, local_or_zulu)
-    
+        return "%sAlarm set for %s %s." % (maybe_warn, numbers, local_or_zulu)
+        
     def speak_times(self, sound_thing):
         """Speak the current time, and if set, the alarm clock trigger
 time."""
@@ -127,11 +147,11 @@ time."""
         
         strings = [
             self.get_alarm_time_text(),
-            "Currently",
+            "Now",
             text_from_hhmm_string(time.strftime("%H:%M", local)),
             "local time",
             text_from_hhmm_string(time.strftime("%H:%M", zulu)),
-            "zulu",
+            "zulu.",
         ]
         
         sound_thing.speak(' '.join(strings))
@@ -143,8 +163,8 @@ time."""
             if i == 2 and char != ':': return False
             if i != 2 and not char.isdigit(): return False
         
-        if int(self._alarm_hhmm_time[:2]) > 23: return False
-        if int(self._alarm_hhmm_time[3:]) > 59: return False
+        if self._alarm_hhmm_time[:2] > '23': return False
+        if self._alarm_hhmm_time[3:] > '59': return False
         
         return True
     
@@ -241,8 +261,13 @@ object to function. Sounds are played in the priority order:
         # the process ended on, to facilitate fading in volume.
         "_speak_end_ticks",
         
-        # Analagous fields for the alarm sound.
+        # Tick that the alarm sound is scheduled to start on, used to
+        # fade out background pink noise. Set to None when there's no
+        # alarm imminently scheduled to ring and there's no alarm
+        # sound currently playing.
         "_alarm_start_ticks",
+        
+        # Once the alarm sound ends, set to the tick the sound ended on.
         "_alarm_end_ticks",
         
         # Pygame sound objects.
@@ -289,8 +314,8 @@ object to function. Sounds are played in the priority order:
     def update(self):
         """Call periodically to make this object function correctly."""
         
-        # Go through and roughly update each member variable
-        # (described in __slots__) in order.
+        # Go through and update each member variable
+        # (described in __slots__) roughly in order.
         
         t = pygame.time.get_ticks()
         
@@ -323,14 +348,15 @@ object to function. Sounds are played in the priority order:
         # If the alarm is scheduled to ring and is not already
         # ringing, start the alarm sound.
         alarm_scheduled_now = (
-            self._alarm_start_ticks and
+            self._alarm_start_ticks is not None and
             self._alarm_start_ticks <= t
         )
-        alarm_ringing = (self._alarm_pygame_channel is not None and
-             self._alarm_pygame_channel.get_busy()
+        alarm_ringing = (
+            self._alarm_pygame_channel is not None and
+            self._alarm_pygame_channel.get_busy()
         )
         if alarm_scheduled_now and not alarm_ringing:
-            self._alarm_pygame_channel = self._alarm_pygame_sound.play(1)
+            self._alarm_pygame_channel = self._alarm_pygame_sound.play()
 
         # Finally, we need to set the actual volumes for the noise and
         # alarm channels, taking into account any fade-in/fade-out effects.
@@ -397,6 +423,14 @@ other necessary state changes.
             os.close(read_fd)
             os.close(write_fd)
     
+    def alarm_busy(self):
+        alarm_scheduled_now = self._alarm_start_ticks is not None
+        alarm_ringing = (
+            self._alarm_pygame_channel is not None and
+            self._alarm_pygame_channel.get_busy()
+        )
+        return alarm_scheduled_now or alarm_ringing
+    
     def noise_volume(self, volume=None):
         """Get the noise volume. If an argument is passed, set the noise
 volume.
@@ -426,6 +460,7 @@ set the alarm clock ring volume.
     
     def start_alarm_test(self):
         """Start the alarm clock test (ring alarm immediately)."""
+        self.speak("Testing alarm.")
         t = pygame.time.get_ticks()
         self._alarm_start_ticks = t + 1
     
@@ -452,38 +487,42 @@ set the alarm clock ring volume.
     
 def text_from_hhmm_string(string):
     """Convert an "hh:mm" string to a (spoken) text representation."""
-    result = ""
+    words = []
     
     for i,s in enumerate(string.split(':')):
         digit_table = {
-            "0":"zero ", "1":"one ", "2":"two ", "3":"three ", "4":"four ",
-            "5":"five ", "6":"six ", "7":"seven ", "8":"eight ", "9":"nine ",
+            "0":"zero", "1":"one", "2":"two", "3":"three", "4":"four",
+            "5":"five", "6":"six", "7":"seven", "8":"eight", "9":"nine",
         }
         
-        special_case_table = {
-            "10":"ten ",
-            "11":"eleven ",
-            "12":"twelve ",
-        }
+        txt = None
         
+        if i == 1:
+            special_case_table = {
+                "00":"hundred",
+            }
+        elif i == 0:
+            special_case_table = {
+                "10":"ten",
+                "11":"eleven",
+                "12":"twelve",
+            }
         txt = special_case_table.get(s)
         
-        if i == 1 and s == "00":
-            txt = "hundred "
-        
         if txt:
-            result += txt
+            words.append(txt)
         else:
-            result += ''.join(map(digit_table.get, s))
+            words += map(digit_table.get, s)
     
-    return result
+    return ' '.join(words)
+
 
 class PublicFunctions(object):
-    def alarm_test_mode(pf):
-        pf.in_alarm_test_mode = True
+    """Collection of functions that the user can bind to keyboard actions."""
     
     def __init__(pf, sound, alarm):
-        pf.in_alarm_test_mode = False
+        """Pass in the SoundThingie and the AlarmClock objects."""
+        pf.say_hello_world = lambda: sound.speak("Hello, world!")
     
         pf.input0 = lambda: (alarm.input_digit('0'), sound.speak('0'))
         pf.input1 = lambda: (alarm.input_digit('1'), sound.speak('1'))
@@ -496,6 +535,9 @@ class PublicFunctions(object):
         pf.input8 = lambda: (alarm.input_digit('8'), sound.speak('8'))
         pf.input9 = lambda: (alarm.input_digit('9'), sound.speak('9'))
         pf.confirm_alarm = lambda: alarm.confirm_input(sound)
+        pf.confirm_alarm_hour = lambda: alarm.confirm_input_hour(sound)
+        
+        pf.silence_alarm = sound.stop_alarm
         pf.cancel_alarm = lambda: (alarm.cancel(sound), sound.stop_alarm())
         
         pf.noise_volume_down = lambda: \
@@ -507,6 +549,18 @@ class PublicFunctions(object):
         pf.alarm_volume_up = lambda: \
             sound.alarm_volume(sound.alarm_volume() + volume_adjust_step)
         
+        # Volume adjust and cancel by default act on the alarm sound
+        # if it's currently playing; otherwise, they adjust the
+        # background noise volume and the set alarm clock trigger
+        # time, respectively.
+        alarm_busy = sound.alarm_busy
+        pf.volume_up = lambda: \
+            (pf.alarm_volume_up if alarm_busy() else pf.noise_volume_up)()
+        pf.volume_down = lambda: \
+            (pf.alarm_volume_down if alarm_busy() else pf.noise_volume_down)()
+        pf.cancel = lambda: \
+            (sound.stop_alarm if alarm_busy() else pf.cancel_alarm)()
+        
         pf.time = lambda: alarm.speak_times(sound)
         
         pf.toggle_next_alarm_in_local_time = \
@@ -514,15 +568,42 @@ class PublicFunctions(object):
         
         pf.toggle_local_time = pf.toggle_next_alarm_in_local_time
         
+        pf.test_alarm = lambda: \
+            (sound.stop_alarm if alarm_busy() else sound.start_alarm_test)()
+
         pf.use_local_time = \
             lambda: alarm.toggle_next_alarm_in_local_time(sound, True)
         pf.use_zulu_time = \
             lambda: alarm.toggle_next_alarm_in_local_time(sound, False)
         
-        pf.quit = sys.exit
+        pf.quit = lambda: sys.exit(0)
         
+        pf.debug_alarm_should_ring = lambda: sys.stdout.write(
+            "Alarm should ring.\n" if alarm.should_ring() else "no.\n")
+
+
 def make_key_char_to_function_dict(pf):
-    base_dict = {
+    """Given the PublicFunctions collection of user-facing functions,
+return a dict that maps keyboard characters to callable
+functions. Provide the default such dict first, then modify it by
+parsing the keybind file.
+
+keybind syntax:
+
+Lines starting with '#' or ';' (no whitespace before) are comments.
+
+Other lines should be a string of whitespace separated tokens.
+
+First token on line should name a callable in pf (PublicFunctions).
+
+Subsequent tokens should either be single characters (maps keystroke
+to the callable named at the start of the line), or a 2 digit hex
+number.
+
+    """
+    the_dict = {
+        'H':pf.say_hello_world,
+    
         '0':pf.input0,
         '1':pf.input1,
         '2':pf.input2,
@@ -533,19 +614,38 @@ def make_key_char_to_function_dict(pf):
         '7':pf.input7,
         '8':pf.input8,
         '9':pf.input9,
+        
         '\r':pf.confirm_alarm,
         '\n':pf.confirm_alarm,
         'c':pf.confirm_alarm,
-        '\x1b':pf.cancel_alarm,
-        '\x7f':pf.cancel_alarm,
-        '\x08':pf.cancel_alarm,
-        'x':pf.cancel_alarm,
         
-        '+':pf.noise_volume_up,
-        '=':pf.noise_volume_up,
-        'u':pf.noise_volume_up,
-        '-':pf.noise_volume_down,
-        'd':pf.noise_volume_down,
+        '\x09':pf.confirm_alarm_hour,
+        'h':pf.confirm_alarm_hour,
+        
+        '\x7f':pf.cancel,
+        '\x07':pf.cancel,
+        '\x08':pf.cancel,
+        'x':pf.cancel,
+        
+        's':pf.silence_alarm,
+        '\x1b':pf.silence_alarm,
+        
+        '+':pf.volume_up,
+        '=':pf.volume_up,
+        'u':pf.volume_up,
+        ']':pf.volume_up,
+        
+        '-':pf.volume_down,
+        'd':pf.volume_down,
+        '[':pf.volume_down,
+        
+        'U':pf.alarm_volume_up,
+        '}':pf.alarm_volume_up,
+        'D':pf.alarm_volume_down,
+        '{':pf.alarm_volume_down,
+        
+        '\x15':pf.noise_volume_up,
+        '\x04':pf.noise_volume_down,
         
         't':pf.time,
         '/':pf.time,
@@ -555,38 +655,70 @@ def make_key_char_to_function_dict(pf):
         'l':pf.use_local_time,
         '*':pf.toggle_local_time,
         
-        '.':pf.alarm_test_mode,
+        '.':pf.test_alarm,
+        'T':pf.test_alarm,
         
         'Q':pf.quit,
         '\x11':pf.quit,
         '\x17':pf.quit,
+        
+        '\x01':pf.debug_alarm_should_ring,
     }
     
-    return base_dict
-
-def make_alarm_test_function_dict(pf):
-    base_dict = {
-        '+':pf.alarm_volume_up,
-        '=':pf.alarm_volume_up,
-        'u':pf.alarm_volume_up,
-        '-':pf.alarm_volume_down,
-        'd':pf.alarm_volume_down,
-    }
+    try:
+        f = open(keybind_filename, 'r')
+    except Exception as e:
+        sys.stderr.write("Could not open %s: %r\n" % (keybind_filename, e))
+        return the_dict
     
-    return base_dict
+    line_number = 0
+    for line in f:
+        line_number += 1
+        
+        if line.startswith('#') or line.startswith(';'): continue
+        
+        tokens = line.split()
+        
+        if len(tokens) < 1: continue
+        
+        callback = pf.__dict__.get(tokens[0])
+        if callback is None:
+            sys.stderr.write("Line %d: No such callable `%s`.\n" % 
+                (line_number, tokens[0])
+            )
+            continue
+        
+        for token in tokens[1:]:
+            if len(token) == 1:
+                the_dict[token] = callback
+            else:
+                try:
+                    if len(token) != 2:
+                        raise ValueError("Expected single character "
+                            "or 2 digit hex number.")
+                    the_dict[chr(int(token, 16))] = callback
+                except Exception as e:
+                    sys.stderr.write("Line %d: Invalid token `%s`: %r.\n" %
+                        (line_number, token, e))
+                    
+    return the_dict
 
 def main():
+    """Instantiate the singleton objects for managing playing sounds,
+tracking the alarm clock trigger time, and mapping user input to
+actions. Then run the main loop."""
     sound = SoundThingie()
     alarm = Alarm()
     
     pf = PublicFunctions(sound, alarm)
     key_char_to_function_dict = make_key_char_to_function_dict(pf)
-    alarm_test_function_dict = make_alarm_test_function_dict(pf)
     
-    alarm_test_mode = False
-    
+    pygame.display.set_caption("pinkalarm")
     disp = pygame.display.set_mode((200,200))
     
+    # Main loop -- need to update the SoundThingie object, check if the
+    # alarm needs to ring, and check user keyboard input and perform
+    # the corresponding actions.
     while 1:
         time.sleep(0.008)
         sound.update()
@@ -598,27 +730,12 @@ def main():
             if e.type == pygame.QUIT:
                 return
             if e.type == pygame.KEYDOWN and e.unicode:
-                if pf.in_alarm_test_mode:
-                    function_dict = alarm_test_function_dict
-                else:
-                    function_dict = key_char_to_function_dict
-                
-                was_in_alarm_test_mode = pf.in_alarm_test_mode
-                
-                callback = function_dict.get(e.unicode)
+                callback = key_char_to_function_dict.get(e.unicode)
                 if callback is not None:
                     callback()
-                if callback is None and pf.in_alarm_test_mode:
-                    pf.in_alarm_test_mode = False
+                elif ord(e.unicode) < 128:
+                    sys.stderr.write("No action for keystroke \\x%02x: %s\n" %
+                        (ord(e.unicode), str(e.unicode)))
                 
-                if pf.in_alarm_test_mode and not was_in_alarm_test_mode:
-                    sound.stop_alarm()
-                    sound.start_alarm_test()
-                    sound.speak("alarm test mode")
-                
-                if not pf.in_alarm_test_mode and was_in_alarm_test_mode:
-                    sound.stop_alarm()
-                    sound.speak("exit alarm test")
-
 if __name__ == "__main__":
     main()
