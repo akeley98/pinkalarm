@@ -1,3 +1,4 @@
+; Copy to keybinds.txt to use.
 # Map keyboard characters to actions with lines of the form
 ; <PublicFunction method name> <char1> <char2> ... <charN>
 # chars can be given as literal characters or as 2 digit hex numbers.
@@ -5,3 +6,4 @@
 # must use their hex code.
 
 
+nn
