@@ -537,6 +537,7 @@ process.
 
     """
     start_text_to_speech_process("git pull")
+    print("doing git pull")
 
     status = os.system("git pull origin master")
     
